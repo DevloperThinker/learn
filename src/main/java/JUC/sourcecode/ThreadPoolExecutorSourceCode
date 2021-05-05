@@ -1,0 +1,302 @@
+ThreadPoolExecutor源码解析
+ 1、常用变量的解释
+1、ctl可以看做一个int类型的数字，高3位为线程池状态（RUNNING、SHUTDOWN、STOP、TIDYING、TERMINATED），低29位标识worker数量
+ private final AtomicInteger ctl = new AtomicInteger(ctlOf(RUNNING, 0));
+2、COUNT_BITS，Integer.SIZE为32，所以COUNT_BITS为29
+private static final int COUNT_BITS = Integer.SIZE - 3;
+3、线程池运行的最大线程数，1左移29位，即为2^29-1
+private static final int CAPACITY   = (1 << COUNT_BITS) - 1;
+
+// runState is stored in the high-order bits
+4、线程池有5中状态，按大小顺序：RUNNING < SHUTDOWN < STOP < TIDYING < TERMINATED
+private static final int RUNNING    = -1 << COUNT_BITS;
+private static final int SHUTDOWN   =  0 << COUNT_BITS;
+private static final int STOP       =  1 << COUNT_BITS;
+private static final int TIDYING    =  2 << COUNT_BITS;
+private static final int TERMINATED =  3 << COUNT_BITS;
+
+// Packing and unpacking ctl
+5、获取线程池状态，通过按位与操作，低29位将全部变成0
+private static int runStateOf(int c)     { return c & ~CAPACITY; }
+6、获取线程池worker数量，通过按位与操作，高3位将全部变成0
+private static int workerCountOf(int c)  { return c & CAPACITY; }
+7、根基线程池状态和线程池worker数量，生成ctl值
+private static int ctlOf(int rs, int wc) { return rs | wc; }
+
+
+/*
+* Bit field accessors that don't require unpacking ctl.
+* These depend on the bit layout and on workerCount being never negative.
+*/
+8、线程池状态小于XX
+private static boolean runStateLessThan(int c, int s) {
+    return c < s;
+}
+9、线程池状态大于等于XX
+private static boolean runStateAtLeast(int c, int s) {
+    return c >= s;
+}
+
+2、构造方法
+public ThreadPoolExecutor(int corePoolSize,
+                              int maximumPoolSize,
+                              long keepAliveTime,
+                              TimeUnit unit,
+                              BlockingQueue<Runnable> workQueue,
+                              ThreadFactory threadFactory,
+                              RejectedExecutionHandler handler) {
+        if (corePoolSize < 0 ||
+            maximumPoolSize <= 0 ||
+            maximumPoolSize < corePoolSize ||
+            keepAliveTime < 0)
+            throw new IllegalArgumentException();
+        if (workQueue == null || threadFactory == null || handler == null)
+            throw new NullPointerException();
+        this.acc = System.getSecurityManager() == null ?
+                null :
+                AccessController.getContext();
+        this.corePoolSize = corePoolSize;
+        this.maximumPoolSize = maximumPoolSize;
+        this.workQueue = workQueue;
+        this.keepAliveTime = unit.toNanos(keepAliveTime);
+        this.threadFactory = threadFactory;
+        this.handler = handler;
+    }
+
+ 3、提交执行task的过程
+public void execute(Runnable command) {
+if (command == null)
+    throw new NullPointerException();
+/*
+ * Proceed in 3 steps:
+ *
+ * 1. If fewer than corePoolSize threads are running, try to
+ * start a new thread with the given command as its first
+ * task.  The call to addWorker atomically checks runState and
+ * workerCount, and so prevents false alarms that would add
+ * threads when it shouldn't, by returning false.
+ *
+ * 2. If a task can be successfully queued, then we still need
+ * to double-check whether we should have added a thread
+ * (because existing ones died since last checking) or that
+ * the pool shut down since entry into this method. So we
+ * recheck state and if necessary roll back the enqueuing if
+ * stopped, or start a new thread if there are none.
+ *
+ * 3. If we cannot queue task, then we try to add a new
+ * thread.  If it fails, we know we are shut down or saturated
+ * and so reject the task.
+ */
+int c = ctl.get();
+//worker数量比核心线程数小，直接创建worker执行任务
+if (workerCountOf(c) < corePoolSize) {
+    if (addWorker(command, true))
+        return;
+    c = ctl.get();
+}
+//worker数量超过核心线程数，任务直接进入队列
+if (isRunning(c) && workQueue.offer(command)) {
+    int recheck = ctl.get();
+    //线程池状态不是running状态，说明执行过shutdown命令，需要对新加入的任务执行reject()操作
+    //为什么需要recheck?是因为任务如队列前后，线程池的状态可能会发生变化
+    if (! isRunning(recheck) && remove(command))
+        reject(command);
+    //为什么需要判断0值，主要是在线程池构造方法中，核心线程数允许为0
+    else if (workerCountOf(recheck) == 0)
+        addWorker(null, false);
+}
+//如果线程池不是允许状态，或者任务进入队列失败，则尝试创建worker执行任务
+//注意三点：
+//1、线程池不是运行状态时，addWorker内部会判断线程池状态
+//2、addWorker第2个参数表示是否创建核心线程
+//3、addWorker返回false，则说明任务执行失败，需要执行reject操作
+else if (!addWorker(command, false))
+    reject(command);
+}
+
+4、addWorker解析
+private boolean addWorker(Runnable firstTask, boolean core) {
+        retry:
+        //外层自旋
+        for (;;) {
+            int c = ctl.get();
+            int rs = runStateOf(c);
+
+            // Check if queue empty only if necessary.
+            if (rs >= SHUTDOWN &&
+                ! (rs == SHUTDOWN &&
+                   firstTask == null &&
+                   ! workQueue.isEmpty()))
+                return false;
+
+            for (;;) {
+                int wc = workerCountOf(c);
+                if (wc >= CAPACITY ||
+                    wc >= (core ? corePoolSize : maximumPoolSize))
+                    return false;
+                if (compareAndIncrementWorkerCount(c))
+                    break retry;
+                c = ctl.get();  // Re-read ctl
+                if (runStateOf(c) != rs)
+                    continue retry;
+                // else CAS failed due to workerCount change; retry inner loop
+            }
+        }
+
+        boolean workerStarted = false;
+        boolean workerAdded = false;
+        Worker w = null;
+        try {
+            w = new Worker(firstTask);
+            final Thread t = w.thread;
+            if (t != null) {
+                final ReentrantLock mainLock = this.mainLock;
+                mainLock.lock();
+                try {
+                    // Recheck while holding lock.
+                    // Back out on ThreadFactory failure or if
+                    // shut down before lock acquired.
+                    int rs = runStateOf(ctl.get());
+
+                    if (rs < SHUTDOWN ||
+                        (rs == SHUTDOWN && firstTask == null)) {
+                        if (t.isAlive()) // precheck that t is startable
+                            throw new IllegalThreadStateException();
+                        workers.add(w);
+                        int s = workers.size();
+                        if (s > largestPoolSize)
+                            largestPoolSize = s;
+                        workerAdded = true;
+                    }
+                } finally {
+                    mainLock.unlock();
+                }
+                if (workerAdded) {
+                    t.start();
+                    workerStarted = true;
+                }
+            }
+        } finally {
+            if (! workerStarted)
+                addWorkerFailed(w);
+        }
+        return workerStarted;
+    }
+
+ 5、线程池worker任务单元
+  private final class Worker
+         extends AbstractQueuedSynchronizer
+         implements Runnable
+     {
+         /**
+          * This class will never be serialized, but we provide a
+          * serialVersionUID to suppress a javac warning.
+          */
+         private static final long serialVersionUID = 6138294804551838833L;
+
+         /** Thread this worker is running in.  Null if factory fails. */
+         final Thread thread;
+         /** Initial task to run.  Possibly null. */
+         Runnable firstTask;
+         /** Per-thread task counter */
+         volatile long completedTasks;
+
+         /**
+          * Creates with given first task and thread from ThreadFactory.
+          * @param firstTask the first task (null if none)
+          */
+         Worker(Runnable firstTask) {
+             setState(-1); // inhibit interrupts until runWorker
+             this.firstTask = firstTask;
+             this.thread = getThreadFactory().newThread(this);
+         }
+
+         /** Delegates main run loop to outer runWorker  */
+         public void run() {
+             runWorker(this);
+         }
+
+         // Lock methods
+         //
+         // The value 0 represents the unlocked state.
+         // The value 1 represents the locked state.
+
+         protected boolean isHeldExclusively() {
+             return getState() != 0;
+         }
+
+         protected boolean tryAcquire(int unused) {
+             if (compareAndSetState(0, 1)) {
+                 setExclusiveOwnerThread(Thread.currentThread());
+                 return true;
+             }
+             return false;
+         }
+
+         protected boolean tryRelease(int unused) {
+             setExclusiveOwnerThread(null);
+             setState(0);
+             return true;
+         }
+
+         public void lock()        { acquire(1); }
+         public boolean tryLock()  { return tryAcquire(1); }
+         public void unlock()      { release(1); }
+         public boolean isLocked() { return isHeldExclusively(); }
+
+         void interruptIfStarted() {
+             Thread t;
+             if (getState() >= 0 && (t = thread) != null && !t.isInterrupted()) {
+                 try {
+                     t.interrupt();
+                 } catch (SecurityException ignore) {
+                 }
+             }
+         }
+     }
+
+6、runWorker解析
+
+final void runWorker(Worker w) {
+        Thread wt = Thread.currentThread();
+        Runnable task = w.firstTask;
+        w.firstTask = null;
+        w.unlock(); // allow interrupts
+        boolean completedAbruptly = true;
+        try {
+            while (task != null || (task = getTask()) != null) {
+                w.lock();
+                // If pool is stopping, ensure thread is interrupted;
+                // if not, ensure thread is not interrupted.  This
+                // requires a recheck in second case to deal with
+                // shutdownNow race while clearing interrupt
+                if ((runStateAtLeast(ctl.get(), STOP) ||
+                     (Thread.interrupted() &&
+                      runStateAtLeast(ctl.get(), STOP))) &&
+                    !wt.isInterrupted())
+                    wt.interrupt();
+                try {
+                    beforeExecute(wt, task);
+                    Throwable thrown = null;
+                    try {
+                        task.run();
+                    } catch (RuntimeException x) {
+                        thrown = x; throw x;
+                    } catch (Error x) {
+                        thrown = x; throw x;
+                    } catch (Throwable x) {
+                        thrown = x; throw new Error(x);
+                    } finally {
+                        afterExecute(task, thrown);
+                    }
+                } finally {
+                    task = null;
+                    w.completedTasks++;
+                    w.unlock();
+                }
+            }
+            completedAbruptly = false;
+        } finally {
+            processWorkerExit(w, completedAbruptly);
+        }
+    }
