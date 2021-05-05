@@ -5,6 +5,8 @@ ArrayList源码解读
 ArrayList <-- AbstractList <-- AbstractCollection <-- Collection
 且实现了RandomAccess接口，只要List集合实现这个接口，就能支持快速随机访问
 
+
+一、常用变量的解释
 1、List集合实现这个RandomAccess接口，就能支持快速随机访问。可以采用for循环遍历，未实现该接口的，只能使用迭代器进行遍历
 public class ArrayList<E> extends AbstractList<E>
         implements List<E>, RandomAccess, Cloneable, java.io.Serializable
