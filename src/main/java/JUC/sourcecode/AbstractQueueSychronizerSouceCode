@@ -1,0 +1,485 @@
+AbstractQueuedSynchronizer 源码解读
+抽象队列同步器
+
+public abstract class AbstractQueuedSynchronizer
+    extends AbstractOwnableSynchronizer
+    implements java.io.Serializable
+
+一、常用变量
+
+
+    /**
+     * Head of the wait queue, lazily initialized.  Except for
+     * initialization, it is modified only via method setHead.  Note:
+     * If head exists, its waitStatus is guaranteed not to be
+     * CANCELLED.
+     */
+     //CLH队列的头节点
+    private transient volatile Node head;
+
+    /**
+     * Tail of the wait queue, lazily initialized.  Modified only via
+     * method enq to add new wait node.
+     */
+     //CLH队列的尾部节点
+    private transient volatile Node tail;
+
+    /**
+     * The synchronization state.
+     */
+    private volatile int state;
+
+二、内部类
+//CLH（三个人名字的首字母）队列，通过双向队列(FIFO)来完成同步状态。每个线程都会被封装成一个Node节点放到同步队列中
+
+static final class Node {
+    /** Marker to indicate a node is waiting in shared mode */
+    //共享模式下等待的标记
+    static final Node SHARED = new Node();
+    /** Marker to indicate a node is waiting in exclusive mode */
+    //独占模式下等待的标记
+    static final Node EXCLUSIVE = null;
+
+    //线程的等待状态
+    /** waitStatus value to indicate thread has cancelled */
+    //表示线程已经被取消
+    static final int CANCELLED =  1;
+    /** waitStatus value to indicate successor's thread needs unparking */
+    //表示后继线程需要被唤醒
+    static final int SIGNAL    = -1;
+    /** waitStatus value to indicate thread is waiting on condition */
+    //表示线程在Condition上
+    static final int CONDITION = -2;
+    /**
+     * waitStatus value to indicate the next acquireShared should
+     * unconditionally propagate
+     */
+     //表示下一个acquireShared需要无条件的传播
+    static final int PROPAGATE = -3;
+
+    /**
+     * Status field, taking on only the values:
+     *   SIGNAL:     The successor of this node is (or will soon be)
+     *               blocked (via park), so the current node must
+     *               unpark its successor when it releases or
+     *               cancels. To avoid races, acquire methods must
+     *               first indicate they need a signal,
+     *               then retry the atomic acquire, and then,
+     *               on failure, block.
+     *   CANCELLED:  This node is cancelled due to timeout or interrupt.
+     *               Nodes never leave this state. In particular,
+     *               a thread with cancelled node never again blocks.
+     *   CONDITION:  This node is currently on a condition queue.
+     *               It will not be used as a sync queue node
+     *               until transferred, at which time the status
+     *               will be set to 0. (Use of this value here has
+     *               nothing to do with the other uses of the
+     *               field, but simplifies mechanics.)
+     *   PROPAGATE:  A releaseShared should be propagated to other
+     *               nodes. This is set (for head node only) in
+     *               doReleaseShared to ensure propagation
+     *               continues, even if other operations have
+     *               since intervened.
+     *   0:          None of the above
+     *
+     * The values are arranged numerically to simplify use.
+     * Non-negative values mean that a node doesn't need to
+     * signal. So, most code doesn't need to check for particular
+     * values, just for sign.
+     *
+     * The field is initialized to 0 for normal sync nodes, and
+     * CONDITION for condition nodes.  It is modified using CAS
+     * (or when possible, unconditional volatile writes).
+     */
+     //waitStatus的初始值时0,使用CAS来修改节点的状态
+    volatile int waitStatus;
+
+    /**
+     * Link to predecessor node that current node/thread relies on
+     * for checking waitStatus. Assigned during enqueuing, and nulled
+     * out (for sake of GC) only upon dequeuing.  Also, upon
+     * cancellation of a predecessor, we short-circuit while
+     * finding a non-cancelled one, which will always exist
+     * because the head node is never cancelled: A node becomes
+     * head only as a result of successful acquire. A
+     * cancelled thread never succeeds in acquiring, and a thread only
+     * cancels itself, not any other node.
+     */
+    //当前节点的前驱节点，当前线程依赖它来检查waitState
+    volatile Node prev;
+
+    /**
+     * Link to the successor node that the current node/thread
+     * unparks upon release. Assigned during enqueuing, adjusted
+     * when bypassing cancelled predecessors, and nulled out (for
+     * sake of GC) when dequeued.  The enq operation does not
+     * assign next field of a predecessor until after attachment,
+     * so seeing a null next field does not necessarily mean that
+     * node is at end of queue. However, if a next field appears
+     * to be null, we can scan prev's from the tail to
+     * double-check.  The next field of cancelled nodes is set to
+     * point to the node itself instead of null, to make life
+     * easier for isOnSyncQueue.
+     */
+     //当前节点的后驱节点，当前线程释放的才被唤醒
+    volatile Node next;
+
+    /**
+     * The thread that enqueued this node.  Initialized on
+     * construction and nulled out after use.
+     */
+     //当前节点的线程
+    volatile Thread thread;
+
+    /**
+     * Link to next node waiting on condition, or the special
+     * value SHARED.  Because condition queues are accessed only
+     * when holding in exclusive mode, we just need a simple
+     * linked queue to hold nodes while they are waiting on
+     * conditions. They are then transferred to the queue to
+     * re-acquire. And because conditions can only be exclusive,
+     * we save a field by using special value to indicate shared
+     * mode.
+     */
+     //链接到下一个节点的等待条件
+    Node nextWaiter;
+
+    /**
+     * Returns true if node is waiting in shared mode.
+     */
+     //判断是否为共享模式
+    final boolean isShared() {
+        return nextWaiter == SHARED;
+    }
+
+    /**
+     * Returns previous node, or throws NullPointerException if null.
+     * Use when predecessor cannot be null.  The null check could
+     * be elided, but is present to help the VM.
+     *
+     * @return the predecessor of this node
+     */
+     //获取当前节点的前驱节点，如果获取不到，抛出异常
+    final Node predecessor() throws NullPointerException {
+        Node p = prev;
+        if (p == null)
+            throw new NullPointerException();
+        else
+            return p;
+    }
+
+    Node() {    // Used to establish initial head or SHARED marker
+    }
+    //指定线程和模式的构造方法
+    Node(Thread thread, Node mode) {     // Used by addWaiter
+        this.nextWaiter = mode;
+        this.thread = thread;
+    }
+    //指定线程和节点状态的构造方法
+    Node(Thread thread, int waitStatus) { // Used by Condition
+        this.waitStatus = waitStatus;
+        this.thread = thread;
+    }
+}
+
+三、重要方法
+1、addWaiter
+/**
+ * Creates and enqueues node for current thread and given mode.
+ *
+ * @param mode Node.EXCLUSIVE for exclusive, Node.SHARED for shared
+ * @return the new node
+ */
+private Node addWaiter(Node mode) {
+    //由于AQS队列当中的元素类型为Node，故而需要把当前线程封装为一个node
+    Node node = new Node(Thread.currentThread(), mode);
+    // Try the fast path of enq; backup to full enq on failure
+    //tail为队尾，赋值为pred
+    Node pred = tail;
+    //判断pred是否为空，就是判断队尾是否有节点
+    if (pred != null) {
+        //直接把当前线程封装的上一个节点设置为pred，即为原来的队尾
+        node.prev = pred;
+        //进行cas，防止多个线程加锁，确保入队列的时候是原子操作
+        if (compareAndSetTail(pred, node)) {
+            //继而把pred的下一个节点设置为当前线程
+            pred.next = node;
+            return node;
+        }
+    }
+    enq(node);
+    return node;
+}
+
+/**
+ * Inserts node into queue, initializing if necessary. See picture above.
+ * @param node the node to insert
+ * @return node's predecessor
+ */
+private Node enq(final Node node) {
+    for (;;) {
+        //队尾赋值给t
+        Node t = tail;
+        //第一次循环t为null
+        if (t == null) { // Must initialize
+            //构造新结点,CAS方式设置为队列首元素,当head==null时更新成功
+            if (compareAndSetHead(new Node()))
+                //尾指针指向首结点
+                tail = head;
+        } else { //队列不为空
+            node.prev = t;
+            //CAS将尾指针指向当前结点,当t(原来的尾指针)==tail(当前真实的尾指针)时执行成功
+            if (compareAndSetTail(t, node)) {
+                 //原尾结点的next指针指向当前结点
+                t.next = node;
+                return t;
+            }
+        }
+    }
+}
+
+2、acquireQueued
+/**
+ * Acquires in exclusive uninterruptible mode for thread already in
+ * queue. Used by condition wait methods as well as acquire.
+ *
+ * @param node the node
+ * @param arg the acquire argument
+ * @return {@code true} if interrupted while waiting
+ */
+final boolean acquireQueued(final Node node, int arg) {
+    boolean failed = true;
+    try {
+        boolean interrupted = false;
+       //死循环,正常情况下线程只有获得锁才能跳出循环
+        for (;;) {
+            //获得当前线程所在结点的前驱结点
+            final Node p = node.predecessor();
+            if (p == head && tryAcquire(arg)) {
+                //将当前结点设置为队列头结点
+                setHead(node);
+                p.next = null; // help GC
+                failed = false;
+                return interrupted;
+            }
+            //判断是否要阻塞当前线程
+            if (shouldParkAfterFailedAcquire(p, node) &&
+                //阻塞当前线程
+                parkAndCheckInterrupt())
+                interrupted = true;
+        }
+    } finally {
+        if (failed)
+            cancelAcquire(node);
+    }
+}
+
+/**
+ * Checks and updates status for a node that failed to acquire.
+ * Returns true if thread should block. This is the main signal
+ * control in all acquire loops.  Requires that pred == node.prev.
+ *
+ * @param pred node's predecessor holding status
+ * @param node the node
+ * @return {@code true} if thread should block
+ */
+ //判断是否要阻塞当前线程
+private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
+    int ws = pred.waitStatus;
+    if (ws == Node.SIGNAL)
+        /*
+         * This node has already set status asking a release
+         * to signal it, so it can safely park.
+         */
+        return true;
+    if (ws > 0) { //状态为CANCELLED
+        /*
+         * Predecessor was cancelled. Skip over predecessors and
+         * indicate retry.
+         */
+        do {
+            node.prev = pred = pred.prev;
+        } while (pred.waitStatus > 0);
+        pred.next = node;
+    } else { /状态为初始化状态(ReentrentLock语境下)
+        /*
+         * waitStatus must be 0 or PROPAGATE.  Indicate that we
+         * need a signal, but don't park yet.  Caller will need to
+         * retry to make sure it cannot acquire before parking.
+         */
+        compareAndSetWaitStatus(pred, ws, Node.SIGNAL);
+    }
+    return false;
+}
+
+
+/**
+ * Convenience method to park and then check if interrupted
+ *
+ * @return {@code true} if interrupted
+ */
+ //通过调用LockSupport的park方法来阻塞当前线程
+private final boolean parkAndCheckInterrupt() {
+    LockSupport.park(this);
+    return Thread.interrupted();
+}
+
+
+3、可响应中断的获取同步状态
+/**
+ * Acquires in exclusive mode, aborting if interrupted.
+ * Implemented by first checking interrupt status, then invoking
+ * at least once {@link #tryAcquire}, returning on
+ * success.  Otherwise the thread is queued, possibly repeatedly
+ * blocking and unblocking, invoking {@link #tryAcquire}
+ * until success or the thread is interrupted.  This method can be
+ * used to implement method {@link Lock#lockInterruptibly}.
+ *
+ * @param arg the acquire argument.  This value is conveyed to
+ *        {@link #tryAcquire} but is otherwise uninterpreted and
+ *        can represent anything you like.
+ * @throws InterruptedException if the current thread is interrupted
+ */
+public final void acquireInterruptibly(int arg)
+        throws InterruptedException {
+    //当前线程被中断，抛出异常
+    if (Thread.interrupted())
+        throw new InterruptedException();
+    //获取同步状态
+    if (!tryAcquire(arg))
+        doAcquireInterruptibly(arg);
+}
+
+
+/**
+ * Acquires in exclusive interruptible mode.
+ * @param arg the acquire argument
+ */
+ //以独占锁的模式获取同步状态，线程被中断抛出异常
+private void doAcquireInterruptibly(int arg)
+    throws InterruptedException {
+    final Node node = addWaiter(Node.EXCLUSIVE);
+    boolean failed = true;
+    try {
+        for (;;) {
+            final Node p = node.predecessor();
+            if (p == head && tryAcquire(arg)) {
+                setHead(node);
+                p.next = null; // help GC
+                failed = false;
+                return;
+            }
+            if (shouldParkAfterFailedAcquire(p, node) &&
+                parkAndCheckInterrupt())
+                throw new InterruptedException();
+        }
+    } finally {
+        if (failed)
+            cancelAcquire(node);
+    }
+}
+
+4、共享锁
+
+/**
+ * Acquires in shared mode, ignoring interrupts.  Implemented by
+ * first invoking at least once {@link #tryAcquireShared},
+ * returning on success.  Otherwise the thread is queued, possibly
+ * repeatedly blocking and unblocking, invoking {@link
+ * #tryAcquireShared} until success.
+ *
+ * @param arg the acquire argument.  This value is conveyed to
+ *        {@link #tryAcquireShared} but is otherwise uninterpreted
+ *        and can represent anything you like.
+ */
+public final void acquireShared(int arg) {
+    if (tryAcquireShared(arg) < 0)
+        doAcquireShared(arg);
+}
+
+//AQS定义，由子类自己实现(比如：CountDownLatch、Semaphore、ReentrantReadWriteLock等)
+protected int tryAcquireShared(int arg) {
+    throw new UnsupportedOperationException();
+}
+
+ /**
+ * Acquires in shared uninterruptible mode.
+ * @param arg the acquire argument
+ */
+private void doAcquireShared(int arg) {
+    final Node node = addWaiter(Node.SHARED);
+    boolean failed = true;
+    try {
+        boolean interrupted = false;
+        for (;;) {
+            final Node p = node.predecessor();
+            if (p == head) {
+                int r = tryAcquireShared(arg);
+                if (r >= 0) {
+                    setHeadAndPropagate(node, r);
+                    p.next = null; // help GC
+                    if (interrupted)
+                        selfInterrupt();
+                    failed = false;
+                    return;
+                }
+            }
+            if (shouldParkAfterFailedAcquire(p, node) &&
+                parkAndCheckInterrupt())
+                interrupted = true;
+        }
+    } finally {
+        if (failed)
+            cancelAcquire(node);
+    }
+}
+
+
+/**
+ * Cancels an ongoing attempt to acquire.
+ *
+ * @param node the node
+ */
+private void cancelAcquire(Node node) {
+    // Ignore if node doesn't exist
+    if (node == null)
+        return;
+
+    node.thread = null;
+
+    // Skip cancelled predecessors
+    Node pred = node.prev;
+    while (pred.waitStatus > 0)
+        node.prev = pred = pred.prev;
+
+    // predNext is the apparent node to unsplice. CASes below will
+    // fail if not, in which case, we lost race vs another cancel
+    // or signal, so no further action is necessary.
+    Node predNext = pred.next;
+
+    // Can use unconditional write instead of CAS here.
+    // After this atomic step, other Nodes can skip past us.
+    // Before, we are free of interference from other threads.
+    node.waitStatus = Node.CANCELLED;
+
+    // If we are the tail, remove ourselves.
+    if (node == tail && compareAndSetTail(node, pred)) {
+        compareAndSetNext(pred, predNext, null);
+    } else {
+        // If successor needs signal, try to set pred's next-link
+        // so it will get one. Otherwise wake it up to propagate.
+        int ws;
+        if (pred != head &&
+            ((ws = pred.waitStatus) == Node.SIGNAL ||
+             (ws <= 0 && compareAndSetWaitStatus(pred, ws, Node.SIGNAL))) &&
+            pred.thread != null) {
+            Node next = node.next;
+            if (next != null && next.waitStatus <= 0)
+                compareAndSetNext(pred, predNext, next);
+        } else {
+            unparkSuccessor(node);
+        }
+
+        node.next = node; // help GC
+    }
+}

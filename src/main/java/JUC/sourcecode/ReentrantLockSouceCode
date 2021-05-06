@@ -242,108 +242,8 @@ final boolean nonfairTryAcquire(int acquires) {
     return false;
 }
 
-2、unlock方法，具体的释放过程由父类AQS定义，具体实现是sync内部类
 
-/**
- * Attempts to release this lock.
- *
- * <p>If the current thread is the holder of this lock then the hold
- * count is decremented.  If the hold count is now zero then the lock
- * is released.  If the current thread is not the holder of this
- * lock then {@link IllegalMonitorStateException} is thrown.
- *
- * @throws IllegalMonitorStateException if the current thread does not
- *         hold this lock
- */
- //调用内部类sync的release方法，由于sync继承了AbstractQueueSychronizer类，release由父类实现
-public void unlock() {
-    sync.release(1);
-}
-
-
-/**
- * Releases in exclusive mode.  Implemented by unblocking one or
- * more threads if {@link #tryRelease} returns true.
- * This method can be used to implement method {@link Lock#unlock}.
- *
- * @param arg the release argument.  This value is conveyed to
- *        {@link #tryRelease} but is otherwise uninterpreted and
- *        can represent anything you like.
- * @return the value returned from {@link #tryRelease}
- */
-public final boolean release(int arg) {
-    //尝试释放锁
-    if (tryRelease(arg)) {
-        //释放锁成功，将head节点赋值给h
-        Node h = head;
-        //如果head节点不为空且等待状态不等0
-        if (h != null && h.waitStatus != 0)
-            //唤醒后续节点
-            unparkSuccessor(h);
-        return true;
-    }
-    return false;
-}
-
-//父类方法，子类实现
-protected final boolean tryRelease(int releases) {
-        // 释放后c的状态值
-        int c = getState() - releases;
-        //如果持有锁的线程不是当前线程，则抛出异常
-        if (Thread.currentThread() != getExclusiveOwnerThread())
-            throw new IllegalMonitorStateException();
-        boolean free = false;
-        if (c == 0) {
-            //如果c等于0，代表释放锁成功
-            free = true;
-            //将锁的拥有者置为空
-            setExclusiveOwnerThread(null);
-        }
-        //设置锁的状态
-        setState(c);
-        return free;
-    }
-
-/**
- * Wakes up node's successor, if one exists.
- *
- * @param node the node
- */
-private void unparkSuccessor(Node node) {
-    /*
-     * If status is negative (i.e., possibly needing signal) try
-     * to clear in anticipation of signalling.  It is OK if this
-     * fails or if status is changed by waiting thread.
-     */
-    //获取节点等待状态
-    int ws = node.waitStatus;
-    if (ws < 0)
-        compareAndSetWaitStatus(node, ws, 0);
-
-    /*
-     * Thread to unpark is held in successor, which is normally
-     * just the next node.  But if cancelled or apparently null,
-     * traverse backwards from tail to find the actual
-     * non-cancelled successor.
-     */
-    //获取释放锁节点的下一个节点
-    Node s = node.next;
-    //如果节点等于null说明没有等待线程，或者节点的等待状态 > 0（目前大于0就是取消状态）
-    if (s == null || s.waitStatus > 0) {
-        //将节点设置为空
-        s = null;
-        //从tail节点开始遍历，找到不为空且的最近节点
-        for (Node t = tail; t != null && t != node; t = t.prev)
-            //如果节点的状态 <= 0(即非取消状态)
-            if (t.waitStatus <= 0)
-                s = t;
-    }
-    if (s != null)
-        //将节点唤醒
-        LockSupport.unpark(s.thread);
-}
-
-3、公平锁的lock方法
+2、公平锁的lock方法
 final void lock() {
     acquire(1);
 }
@@ -414,144 +314,103 @@ public final boolean hasQueuedPredecessors() {
         ((s = h.next) == null || s.thread != Thread.currentThread());
 }
 
-四、AQS公用方法
-1、addWaiter
-/**
- * Creates and enqueues node for current thread and given mode.
- *
- * @param mode Node.EXCLUSIVE for exclusive, Node.SHARED for shared
- * @return the new node
- */
-private Node addWaiter(Node mode) {
-    //由于AQS队列当中的元素类型为Node，故而需要把当前线程封装为一个node
-    Node node = new Node(Thread.currentThread(), mode);
-    // Try the fast path of enq; backup to full enq on failure
-    //tail为队尾，赋值为pred
-    Node pred = tail;
-    //判断pred是否为空，就是判断队尾是否有节点
-    if (pred != null) {
-        //直接把当前线程封装的上一个节点设置为pred，即为原来的队尾
-        node.prev = pred;
-        //进行cas，防止多个线程加锁，确保入队列的时候是原子操作
-        if (compareAndSetTail(pred, node)) {
-            //继而把pred的下一个节点设置为当前线程
-            pred.next = node;
-            return node;
-        }
-    }
-    enq(node);
-    return node;
-}
+3、公共的unlock方法，具体的释放过程由父类AQS定义，具体实现是sync内部类
 
-/**
- * Inserts node into queue, initializing if necessary. See picture above.
- * @param node the node to insert
- * @return node's predecessor
- */
-private Node enq(final Node node) {
-    for (;;) {
-        //队尾赋值给t
-        Node t = tail;
-        //第一次循环t为null
-        if (t == null) { // Must initialize
-            //构造新结点,CAS方式设置为队列首元素,当head==null时更新成功
-            if (compareAndSetHead(new Node()))
-                //尾指针指向首结点
-                tail = head;
-        } else { //队列不为空
-            node.prev = t;
-            //CAS将尾指针指向当前结点,当t(原来的尾指针)==tail(当前真实的尾指针)时执行成功
-            if (compareAndSetTail(t, node)) {
-                 //原尾结点的next指针指向当前结点
-                t.next = node;
-                return t;
-            }
-        }
-    }
-}
-
-2、acquireQueued
-/**
- * Acquires in exclusive uninterruptible mode for thread already in
- * queue. Used by condition wait methods as well as acquire.
- *
- * @param node the node
- * @param arg the acquire argument
- * @return {@code true} if interrupted while waiting
- */
-final boolean acquireQueued(final Node node, int arg) {
-    boolean failed = true;
-    try {
-        boolean interrupted = false;
-       //死循环,正常情况下线程只有获得锁才能跳出循环
-        for (;;) {
-            //获得当前线程所在结点的前驱结点
-            final Node p = node.predecessor();
-            if (p == head && tryAcquire(arg)) {
-                //将当前结点设置为队列头结点
-                setHead(node);
-                p.next = null; // help GC
-                failed = false;
-                return interrupted;
-            }
-            //判断是否要阻塞当前线程
-            if (shouldParkAfterFailedAcquire(p, node) &&
-                //阻塞当前线程
-                parkAndCheckInterrupt())
-                interrupted = true;
-        }
-    } finally {
-        if (failed)
-            cancelAcquire(node);
-    }
-}
-
-/**
- * Checks and updates status for a node that failed to acquire.
- * Returns true if thread should block. This is the main signal
- * control in all acquire loops.  Requires that pred == node.prev.
- *
- * @param pred node's predecessor holding status
- * @param node the node
- * @return {@code true} if thread should block
- */
- //判断是否要阻塞当前线程
-private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
-    int ws = pred.waitStatus;
-    if (ws == Node.SIGNAL)
-        /*
-         * This node has already set status asking a release
-         * to signal it, so it can safely park.
-         */
-        return true;
-    if (ws > 0) { //状态为CANCELLED
-        /*
-         * Predecessor was cancelled. Skip over predecessors and
-         * indicate retry.
-         */
-        do {
-            node.prev = pred = pred.prev;
-        } while (pred.waitStatus > 0);
-        pred.next = node;
-    } else { /状态为初始化状态(ReentrentLock语境下)
-        /*
-         * waitStatus must be 0 or PROPAGATE.  Indicate that we
-         * need a signal, but don't park yet.  Caller will need to
-         * retry to make sure it cannot acquire before parking.
-         */
-        compareAndSetWaitStatus(pred, ws, Node.SIGNAL);
-    }
-    return false;
-}
+  /**
+   * Attempts to release this lock.
+   *
+   * <p>If the current thread is the holder of this lock then the hold
+   * count is decremented.  If the hold count is now zero then the lock
+   * is released.  If the current thread is not the holder of this
+   * lock then {@link IllegalMonitorStateException} is thrown.
+   *
+   * @throws IllegalMonitorStateException if the current thread does not
+   *         hold this lock
+   */
+   //调用内部类sync的release方法，由于sync继承了AbstractQueueSychronizer类，release由父类实现
+  public void unlock() {
+      sync.release(1);
+  }
 
 
-/**
- * Convenience method to park and then check if interrupted
- *
- * @return {@code true} if interrupted
- */
- //通过调用LockSupport的park方法来阻塞当前线程
-private final boolean parkAndCheckInterrupt() {
-    LockSupport.park(this);
-    return Thread.interrupted();
-}
+  /**
+   * Releases in exclusive mode.  Implemented by unblocking one or
+   * more threads if {@link #tryRelease} returns true.
+   * This method can be used to implement method {@link Lock#unlock}.
+   *
+   * @param arg the release argument.  This value is conveyed to
+   *        {@link #tryRelease} but is otherwise uninterpreted and
+   *        can represent anything you like.
+   * @return the value returned from {@link #tryRelease}
+   */
+  public final boolean release(int arg) {
+      //尝试释放锁
+      if (tryRelease(arg)) {
+          //释放锁成功，将head节点赋值给h
+          Node h = head;
+          //如果head节点不为空且等待状态不等0
+          if (h != null && h.waitStatus != 0)
+              //唤醒后续节点
+              unparkSuccessor(h);
+          return true;
+      }
+      return false;
+  }
+
+  //父类方法，子类实现
+  protected final boolean tryRelease(int releases) {
+          // 释放后c的状态值
+          int c = getState() - releases;
+          //如果持有锁的线程不是当前线程，则抛出异常
+          if (Thread.currentThread() != getExclusiveOwnerThread())
+              throw new IllegalMonitorStateException();
+          boolean free = false;
+          if (c == 0) {
+              //如果c等于0，代表释放锁成功
+              free = true;
+              //将锁的拥有者置为空
+              setExclusiveOwnerThread(null);
+          }
+          //设置锁的状态
+          setState(c);
+          return free;
+      }
+
+  /**
+   * Wakes up node's successor, if one exists.
+   *
+   * @param node the node
+   */
+  private void unparkSuccessor(Node node) {
+      /*
+       * If status is negative (i.e., possibly needing signal) try
+       * to clear in anticipation of signalling.  It is OK if this
+       * fails or if status is changed by waiting thread.
+       */
+      //获取节点等待状态
+      int ws = node.waitStatus;
+      if (ws < 0)
+          compareAndSetWaitStatus(node, ws, 0);
+
+      /*
+       * Thread to unpark is held in successor, which is normally
+       * just the next node.  But if cancelled or apparently null,
+       * traverse backwards from tail to find the actual
+       * non-cancelled successor.
+       */
+      //获取释放锁节点的下一个节点
+      Node s = node.next;
+      //如果节点等于null说明没有等待线程，或者节点的等待状态 > 0（目前大于0就是取消状态）
+      if (s == null || s.waitStatus > 0) {
+          //将节点设置为空
+          s = null;
+          //从tail节点开始遍历，找到不为空且的最近节点
+          for (Node t = tail; t != null && t != node; t = t.prev)
+              //如果节点的状态 <= 0(即非取消状态)
+              if (t.waitStatus <= 0)
+                  s = t;
+      }
+      if (s != null)
+          //将节点唤醒
+          LockSupport.unpark(s.thread);
+  }
