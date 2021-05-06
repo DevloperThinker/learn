@@ -1,0 +1,118 @@
+Semaphore 源码解读
+信号量，Semaphore 通常用于限制可以访问某些资源（物理或逻辑的）的线程数目
+
+一、常用变量
+
+二、内部类
+
+//内部定义了一个sync，继承了AQS。sync分为公平和非公平
+abstract static class Sync extends AbstractQueuedSynchronizer {
+    private static final long serialVersionUID = 1192457210091910933L;
+
+    //设置同步状态的值
+    Sync(int permits) {
+        setState(permits);
+    }
+
+    //获取信号量当中的许可数
+    final int getPermits() {
+        return getState();
+    }
+
+    //非公平锁，仅在调用时此信号量中有给定数目的许可时，才从此信号量中获取这些许可。
+    final int nonfairTryAcquireShared(int acquires) {
+        for (;;) {
+            //看看还有几个许可
+            int available = getState();
+            //减去这次需要获取的许可还剩下几个许可
+            int remaining = available - acquires;
+            //如果剩余许可小于0了则直接返回
+            //如果剩余许可大于等于0，尝试原子更新state值，成功了返回许可
+            if (remaining < 0 ||
+                compareAndSetState(available, remaining))
+                return remaining;
+        }
+    }
+    // 如果允许释放许可，则返回 true；否则返回 false
+    protected final boolean tryReleaseShared(int releases) {
+        for (;;) {
+            //获取当前可用许可
+            int current = getState();
+            //加上这次释放的许可
+            int next = current + releases;
+            //边界检测，溢出抛出异常
+            if (next < current) // overflow
+                throw new Error("Maximum permit count exceeded");
+            //利用cas，原子更新state值，更新成功返回true
+            if (compareAndSetState(current, next))
+                return true;
+        }
+    }
+
+    //根据指定的缩减量减小可用许可的数目
+    final void reducePermits(int reductions) {
+        for (;;) {
+            //获取当前许可
+            int current = getState();
+            //减去将要释放的许可
+            int next = current - reductions;
+            //边界检查，溢出抛出异常
+            if (next > current) // underflow
+                throw new Error("Permit count underflow");
+            //利用cas，原子更新state值，更新成功后返回
+            if (compareAndSetState(current, next))
+                return;
+        }
+    }
+
+    //获取并返回立即可用的所有许可
+    final int drainPermits() {
+        for (;;) {
+            //获取当前许可
+            int current = getState();
+            //如果为0，直接返回
+            //如果不为0，尝试原子更新state为0
+            if (current == 0 || compareAndSetState(current, 0))
+                return current;
+        }
+    }
+}
+
+三、构造方法
+ /**
+ * Creates a {@code Semaphore} with the given number of
+ * permits and nonfair fairness setting.
+ *
+ * @param permits the initial number of permits available.
+ *        This value may be negative, in which case releases
+ *        must occur before any acquires will be granted.
+ */
+//指定固定许可数的构造方法
+public Semaphore(int permits) {
+    sync = new NonfairSync(permits);
+}
+
+/**
+ * Creates a {@code Semaphore} with the given number of
+ * permits and the given fairness setting.
+ *
+ * @param permits the initial number of permits available.
+ *        This value may be negative, in which case releases
+ *        must occur before any acquires will be granted.
+ * @param fair {@code true} if this semaphore will guarantee
+ *        first-in first-out granting of permits under contention,
+ *        else {@code false}
+ */
+ //指定固定许可数和公平设置的构造方法
+public Semaphore(int permits, boolean fair) {
+    sync = fair ? new FairSync(permits) : new NonfairSync(permits);
+}
+
+四、重要方法
+
+//从此信号量获取一个许可。获取一个许可（如果提供了一个）并立即返回，将可用的许可数减 1
+//在提供一个许可前一直将线程阻塞，否则线程被中断
+public void acquire() throws InterruptedException {
+    //调用AQS的acquireSharedInterruptibly方法
+    sync.acquireSharedInterruptibly(1);
+}

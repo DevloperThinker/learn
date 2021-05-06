@@ -5,14 +5,14 @@ import java.util.concurrent.TimeUnit;
 
 public class SemaphoreDemo {
     public static void main(String[] args) {
-        Semaphore semaphore = new Semaphore(2);
+        Semaphore semaphore = new Semaphore(1);
 
         new Thread(()->{
             try {
                 semaphore.acquire();
                 System.out.println("T1 running....");
                 TimeUnit.SECONDS.sleep(1);
-                System.out.println("T1 running...");
+                System.out.println("T1 end...");
                 semaphore.release();
             } catch (InterruptedException e) {
                 e.printStackTrace();
@@ -25,7 +25,7 @@ public class SemaphoreDemo {
                 semaphore.acquire();
                 System.out.println("T2 running....");
                 TimeUnit.SECONDS.sleep(1);
-                System.out.println("T2 running...");
+                System.out.println("T2 end...");
                 semaphore.release();
             } catch (InterruptedException e) {
                 e.printStackTrace();
